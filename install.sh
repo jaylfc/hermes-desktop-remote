@@ -96,14 +96,21 @@ log "Remote:  $REMOTE_URL"
 log "Install: $APP_DST"
 log "Repo:    $REPO"
 
-# --- fetch latest release ---
-API="https://api.github.com/repos/${REPO}/releases/latest"
+# --- fetch latest release (prefer gh auth to avoid API 403 rate limits) ---
 log "Fetching latest release…"
-JSON="$(curl -fsSL -H "Accept: application/vnd.github+json" "$API")" \
-  || die "Could not fetch releases. Has CI published one? https://github.com/$REPO/releases"
-
-TAG="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name") or "")' <<<"$JSON")"
-ASSET_URL="$(python3 -c '
+TAG=""
+ASSET_URL=""
+USE_GH=0
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  TAG="$(gh release view -R "$REPO" --json tagName --jq .tagName 2>/dev/null || true)"
+  [[ -n "$TAG" ]] && USE_GH=1
+fi
+if [[ -z "$TAG" ]]; then
+  API="https://api.github.com/repos/${REPO}/releases/latest"
+  JSON="$(curl -fsSL -H "Accept: application/vnd.github+json" "$API")" \
+    || die "Could not fetch releases (API 403?). Install GitHub CLI (\`gh auth login\`) or open https://github.com/$REPO/releases"
+  TAG="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name") or "")' <<<"$JSON")"
+  ASSET_URL="$(python3 -c '
 import json,sys
 name=sys.argv[1]
 rel=json.load(sys.stdin)
@@ -112,7 +119,8 @@ for a in rel.get("assets") or []:
         print(a.get("browser_download_url") or "")
         break
 ' "$ASSET_NAME" <<<"$JSON")"
-[[ -n "$TAG" && -n "$ASSET_URL" ]] || die "No $ASSET_NAME on release $TAG"
+fi
+[[ -n "$TAG" ]] || die "No release found on https://github.com/$REPO/releases"
 
 # Skip download if same tag already installed and app exists (still refresh config/helpers)
 if [[ -f "$VERSION_FILE" && -x "$APP_DST/Contents/MacOS/Hermes" ]]; then
@@ -127,7 +135,12 @@ SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 if [[ "$SKIP_DOWNLOAD" != "1" ]]; then
   log "Release: $TAG"
   log "Downloading $ASSET_NAME…"
-  curl -fL --progress-bar -o "$WORKDIR/$ASSET_NAME" "$ASSET_URL"
+  if [[ "$USE_GH" == "1" ]]; then
+    gh release download -R "$REPO" --pattern "$ASSET_NAME" --dir "$WORKDIR" --clobber
+  else
+    [[ -n "$ASSET_URL" ]] || die "No $ASSET_NAME on release $TAG"
+    curl -fL --progress-bar -o "$WORKDIR/$ASSET_NAME" "$ASSET_URL"
+  fi
   log "Unzipping…"
   ditto -x -k "$WORKDIR/$ASSET_NAME" "$WORKDIR/extract"
   APP_SRC="$(find "$WORKDIR/extract" -name 'Hermes.app' -type d | head -1 || true)"
