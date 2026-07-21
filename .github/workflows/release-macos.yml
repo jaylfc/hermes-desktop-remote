@@ -1,0 +1,246 @@
+# Build official Hermes Desktop from upstream main and publish a macOS .app zip.
+# Users install with: curl -fsSL …/install.sh | bash -s -- 'http://host:9119'
+
+name: Release macOS Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      hermes_ref:
+        description: "Upstream hermes-agent git ref (default origin/main)"
+        required: false
+        default: "origin/main"
+      force:
+        description: "Publish even if upstream SHA already released"
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    # ~06:15 UTC daily — catch overnight main merges
+    - cron: "15 6 * * *"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/release-macos.yml"
+      - "scripts/**"
+      - "install.sh"
+
+concurrency:
+  group: release-macos
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  HERMES_AGENT_REPO: https://github.com/NousResearch/hermes-agent.git
+  NODE_VERSION: "22"
+  # Unsigned community builds (no Apple Developer cert in this repo)
+  CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+jobs:
+  build-and-release:
+    name: Build mac-arm64 .app
+    runs-on: macos-14
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Resolve upstream ref
+        id: upstream
+        env:
+          INPUT_REF: ${{ github.event.inputs.hermes_ref || 'origin/main' }}
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          git clone --filter=blob:none --no-checkout "$HERMES_AGENT_REPO" work/hermes-agent
+          git -C work/hermes-agent fetch --depth=1 origin main
+          # Map origin/main → FETCH_HEAD / main
+          REF="$INPUT_REF"
+          if [[ "$REF" == "origin/main" || "$REF" == "main" ]]; then
+            git -C work/hermes-agent checkout -B hdr-build FETCH_HEAD
+          else
+            git -C work/hermes-agent fetch --depth=1 origin "$REF"
+            git -C work/hermes-agent checkout -B hdr-build FETCH_HEAD
+          fi
+          SHA="$(git -C work/hermes-agent rev-parse HEAD)"
+          SHORT="$(git -C work/hermes-agent rev-parse --short HEAD)"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "Upstream SHA: $SHA"
+
+      - name: Skip if this upstream SHA was already released
+        id: skip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event.inputs.force || 'false' }}
+          SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$FORCE" == "true" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Force publish requested"
+            exit 0
+          fi
+          # Look for tag desktop-upstream-<fullsha>
+          TAG="desktop-upstream-${SHA}"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists — skipping build"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "No existing release for $TAG — will build"
+          fi
+
+      - name: Install monorepo dependencies
+        if: steps.skip.outputs.skip != 'true'
+        working-directory: work/hermes-agent
+        run: |
+          set -euo pipefail
+          # Full checkout of tree for the pinned commit (needed for pack)
+          git checkout -f "${{ steps.upstream.outputs.sha }}"
+          if [[ -f package-lock.json ]]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Pack Desktop (unpacked .app)
+        if: steps.skip.outputs.skip != 'true'
+        working-directory: work/hermes-agent/apps/desktop
+        env:
+          # Avoid interactive / signing surprises in CI
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          ELECTRON_BUILDER_DISABLE_CODE_SIGN: "true"
+        run: |
+          set -euo pipefail
+          npm run pack
+
+      - name: Stage zip artifact
+        if: steps.skip.outputs.skip != 'true'
+        id: artifact
+        env:
+          SHA: ${{ steps.upstream.outputs.sha }}
+          SHORT: ${{ steps.upstream.outputs.short }}
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="work/hermes-agent/apps/desktop/release"
+          if [[ -d "$RELEASE_DIR/mac-arm64/Hermes.app" ]]; then
+            APP="$RELEASE_DIR/mac-arm64/Hermes.app"
+          elif [[ -d "$RELEASE_DIR/mac/Hermes.app" ]]; then
+            APP="$RELEASE_DIR/mac/Hermes.app"
+          else
+            APP="$(find "$RELEASE_DIR" -name 'Hermes.app' -type d | head -1)"
+          fi
+          if [[ -z "${APP:-}" || ! -d "$APP" ]]; then
+            echo "Hermes.app not found under $RELEASE_DIR" >&2
+            find "$RELEASE_DIR" -maxdepth 3 -type d 2>/dev/null || true
+            exit 1
+          fi
+          echo "Using app: $APP"
+          OUT_DIR="$GITHUB_WORKSPACE/dist"
+          mkdir -p "$OUT_DIR"
+          # Name users download
+          ZIP_NAME="Hermes-Desktop-mac-arm64.zip"
+          META_NAME="build-info.json"
+          (
+            cd "$(dirname "$APP")"
+            ditto -c -k --sequesterRsrc --keepParent "$(basename "$APP")" "$OUT_DIR/$ZIP_NAME"
+          )
+          python3 - <<PY
+          import json, os, pathlib, time
+          info = {
+            "upstream_repo": "NousResearch/hermes-agent",
+            "upstream_sha": os.environ["SHA"],
+            "upstream_short": os.environ["SHORT"],
+            "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "runner": "macos-14",
+            "arch": "arm64",
+            "app": "Hermes.app",
+            "artifact": "Hermes-Desktop-mac-arm64.zip",
+            "remote_only_repo": os.environ.get("GITHUB_REPOSITORY", "jaylfc/hermes-desktop-remote"),
+          }
+          pathlib.Path(os.environ["GITHUB_WORKSPACE"], "dist", "build-info.json").write_text(
+              json.dumps(info, indent=2) + "\n"
+          )
+          print(json.dumps(info, indent=2))
+          PY
+          ls -lh "$OUT_DIR"
+          echo "zip=$OUT_DIR/$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "meta=$OUT_DIR/$META_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: steps.skip.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.upstream.outputs.sha }}
+          SHORT: ${{ steps.upstream.outputs.short }}
+        run: |
+          set -euo pipefail
+          TAG="desktop-upstream-${SHA}"
+          # Human-friendly title uses short sha + date
+          TITLE="Hermes Desktop (remote client) ${SHORT}"
+          DATE="$(date -u +%Y-%m-%d)"
+          NOTES="$(cat <<EOF
+          ## Hermes Desktop — remote-only client build
+
+          Prebuilt **macOS Apple Silicon** app from official [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) \`main\`.
+
+          | | |
+          |---|---|
+          | **Upstream commit** | [\`${SHORT}\`](https://github.com/NousResearch/hermes-agent/commit/${SHA}) |
+          | **Built** | ${DATE} (UTC) |
+          | **Arch** | arm64 (Apple Silicon) |
+
+          ### Install (simplest)
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash -s -- 'http://YOUR-HERMES-HOST:9119'
+          \`\`\`
+
+          Replace the URL with your Tailscale/LAN \`hermes serve\` address.
+
+          Then open **Hermes Desktop**, sign in under **Settings → Gateway** if prompted.
+
+          ### Manual
+
+          1. Download \`Hermes-Desktop-mac-arm64.zip\` below
+          2. Unzip → drag **Hermes.app** to Applications (rename to *Hermes Desktop.app* optional)
+          3. Right-click → Open the first time (unsigned community build)
+          4. Settings → Gateway → Remote → your URL → Sign in
+
+          > No local Hermes agent is required on this Mac. Update the **agent** on the remote host with \`hermes update\`.
+
+          Not affiliated with Nous Research. Unsigned build for convenience.
+          EOF
+          )"
+
+          # Delete soft-failed partial tag if any
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes "$NOTES" \
+            --latest \
+            dist/Hermes-Desktop-mac-arm64.zip \
+            dist/build-info.json
+
+          echo "Published release $TAG"
+
+      - name: Upload workflow artifact (always when built)
+        if: steps.skip.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hermes-Desktop-mac-arm64
+          path: |
+            dist/Hermes-Desktop-mac-arm64.zip
+            dist/build-info.json
+          if-no-files-found: error
+          retention-days: 14

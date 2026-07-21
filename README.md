@@ -1,71 +1,122 @@
 # hermes-desktop-remote
 
-**Remote-only Hermes Desktop client** for macOS (and buildable elsewhere).
+**Just want Hermes Desktop as a remote client?** No local agent. No multi‑GB install.
 
-This is a thin ops repo: scripts + templates. It does **not** vendor [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent). It builds the official Desktop app from **latest upstream `main`**, installs it as a standalone GUI, and keeps you on a **remote gateway** (no local Hermes agent required on the client machine).
+Prebuilt **macOS Apple Silicon** app, rebuilt from official [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) `main` via GitHub Actions.
 
-Inspired by [KimFischer99/Hermes-Desktop-Remote](https://github.com/KimFischer99/Hermes-Desktop-Remote) (SSH-forward approach). This project targets **direct remote URLs** (Tailscale / LAN / VPN) instead of mandatory SSH tunnels.
+> Not affiliated with Nous Research. Official “lite client” is still tracked upstream ([#38602](https://github.com/NousResearch/hermes-agent/issues/38602), [PR #60489](https://github.com/NousResearch/hermes-agent/pull/60489)).
 
-> Not affiliated with Nous Research. Official lite-client support is still open upstream ([#38602](https://github.com/NousResearch/hermes-agent/issues/38602), [PR #60489](https://github.com/NousResearch/hermes-agent/pull/60489)).
+---
 
-## Why track latest upstream `main`?
+## Install (one command)
 
-| Strategy | Pros | Cons |
-|---|---|---|
-| **Latest `main` (this repo)** | Newest Desktop UI; simple; one branch | Remote agent can lag slightly behind the GUI |
-| Pin Desktop to remote agent commit | Max protocol alignment | Rebuild only when remote updates; miss pure-UI fixes |
+You need:
 
-**Recommendation:** track **`main`** for the shell, and keep the remote host on a reasonably current Hermes (`hermes update` there). Gateway APIs are usually backward-compatible across nearby versions. If you ever hit a hard protocol break, pin `HERMES_AGENT_REF` to a known-good commit until the remote is updated.
+1. A remote machine already running Hermes (`hermes serve` / dashboard on a reachable URL, e.g. Tailscale).
+2. A Mac with **Apple Silicon**.
 
-## What this gives you
+```bash
+curl -fsSL https://raw.githubusercontent.com/jaylfc/hermes-desktop-remote/main/install.sh \
+  | bash -s -- 'http://YOUR-HOST:9119'
+```
 
-- Standalone `/Applications/Hermes Desktop.app` (Electron shell only on the client)
-- Default **remote** connection config (no local `hermes serve`)
-- `hermes-desktop` launcher that refuses the Setup installer and avoids token-only env traps
-- `update` script that rebuilds when upstream `main` moves
-- Optional LaunchAgent for periodic checks
+Examples:
 
-## Requirements (build machine)
+```bash
+# Tailscale
+curl -fsSL https://raw.githubusercontent.com/jaylfc/hermes-desktop-remote/main/install.sh \
+  | bash -s -- 'http://100.x.x.x:9119'
 
-- macOS Apple Silicon recommended for `mac-arm64` packs (this repo’s default)
-- Node.js 20+ (Homebrew is fine)
-- git, network access to GitHub
-- Disk for a temporary hermes-agent worktree (~2–4 GB while building)
+# Interactive (prompts for URL)
+curl -fsSL https://raw.githubusercontent.com/jaylfc/hermes-desktop-remote/main/install.sh | bash
+```
 
-**You do not need** a permanent local Hermes agent install for day-to-day use.
+Then:
 
-## Quick start
+1. Open **Hermes Desktop** (Spotlight or Applications).
+2. First open: **Right‑click → Open** if macOS Gatekeeper warns (unsigned community build).
+3. **Settings → Gateway → Sign in** (username/password or OAuth — whatever your remote uses).
+
+That’s it. Nothing under `~/.hermes` agent runtime is required on this Mac.
+
+[**Download zip from Releases**](https://github.com/jaylfc/hermes-desktop-remote/releases/latest) if you prefer manual install.
+
+---
+
+## Update the Desktop app
+
+Re-run the same install command (keeps your remote URL if you pass it again, or edit Settings):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jaylfc/hermes-desktop-remote/main/install.sh \
+  | bash -s -- 'http://YOUR-HOST:9119'
+```
+
+Or download the newest zip from [Releases](https://github.com/jaylfc/hermes-desktop-remote/releases/latest).
+
+**Agent updates** (models, tools, gateway) still happen on the **remote host**:
+
+```bash
+# on the server
+hermes update
+```
+
+---
+
+## What gets installed
+
+| Path | Purpose |
+|---|---|
+| `/Applications/Hermes Desktop.app` | Electron UI only |
+| `~/.local/bin/hermes-desktop` | Launcher (remote-safe env) |
+| `~/Library/Application Support/Hermes/connection.json` | `mode: remote` + your URL |
+
+No local Python venv, no agent checkout, no `hermes serve` on the client.
+
+---
+
+## CI / releases
+
+| | |
+|---|---|
+| Workflow | [`.github/workflows/release-macos.yml`](.github/workflows/release-macos.yml) |
+| Runner | `macos-14` (arm64) |
+| Trigger | Daily schedule, manual dispatch, or relevant pushes to `main` |
+| Artifact | `Hermes-Desktop-mac-arm64.zip` + `build-info.json` |
+| Tag | `desktop-upstream-<full-sha>` (skips rebuild if that SHA already released) |
+
+Manual rebuild in GitHub Actions → **Release macOS Desktop** → Run workflow.
+
+---
+
+## Build from source (optional)
+
+Only if you need a custom ref, Intel Mac, or CI isn’t available:
 
 ```bash
 git clone https://github.com/jaylfc/hermes-desktop-remote.git
 cd hermes-desktop-remote
-
 cp templates/remote-desktop.config.env.example remote-desktop.config.env
-# edit REMOTE_URL (and optional auth notes)
+# set REMOTE_URL=...
 
 ./scripts/build.sh
 ./scripts/install.sh
 hermes-desktop
 ```
 
-On first useful launch, open **Settings → Gateway**, confirm **Remote**, and **Sign in** (username/password or OAuth — whatever the remote advertises).
-
-## Config
-
-### `remote-desktop.config.env` (gitignored)
-
-See `templates/remote-desktop.config.env.example`.
-
-| Variable | Meaning |
+| Script | Purpose |
 |---|---|
-| `REMOTE_URL` | e.g. `http://100.x.x.x:9119` (Tailscale / LAN) |
-| `HERMES_AGENT_REF` | default `origin/main` |
-| `INSTALL_APP_NAME` | default `Hermes Desktop.app` |
-| `HERMES_WORKDIR` | clone path for builds (default `./work/hermes-agent`) |
+| `install.sh` | **Preferred** — download CI release + configure remote |
+| `scripts/build.sh` | Compile Desktop from upstream `main` |
+| `scripts/install.sh` | Install a locally built `.app` |
+| `scripts/update.sh` | Local rebuild when upstream SHA changes |
+| `scripts/install-release.sh` | Same as root `install.sh` |
 
-### Desktop connection (runtime)
+---
 
-Install writes:
+## Config notes
+
+Remote connection lives in:
 
 `~/Library/Application Support/Hermes/connection.json`
 
@@ -80,57 +131,43 @@ Install writes:
 }
 ```
 
-`authMode: "oauth"` is correct for gateways with `auth_required: true` (including the **username/password** provider — Desktop uses cookie sessions).
+`authMode: "oauth"` is correct for gateways with `auth_required: true` (including **username/password** — Desktop uses cookie sessions).
 
-**Do not** set `HERMES_DESKTOP_REMOTE_URL` without `HERMES_DESKTOP_REMOTE_TOKEN`. URL-only env forces token-auth and breaks password/cookie login.
+**Do not** set `HERMES_DESKTOP_REMOTE_URL` without `HERMES_DESKTOP_REMOTE_TOKEN`. URL-only env forces token-auth and breaks password login.
 
-## Scripts
+---
 
-| Script | Purpose |
-|---|---|
-| `scripts/build.sh` | Fetch upstream ref, install deps, `npm run pack` in `apps/desktop` |
-| `scripts/install.sh` | Install `.app` to `/Applications`, seed connection.json, install launcher |
-| `scripts/update.sh` | Rebuild + reinstall if upstream SHA changed |
-| `scripts/launch.sh` | Same as `hermes-desktop` |
-| `scripts/install-launchagent.sh` | Optional periodic `update.sh` |
-
-## Updates
-
-```bash
-./scripts/update.sh
-```
-
-Or install the LaunchAgent (default every 48h):
-
-```bash
-./scripts/install-launchagent.sh
-```
-
-**Agent updates** still happen on the **remote host** (`hermes update` there). This repo only refreshes the client GUI.
-
-## Uninstall client
+## Uninstall
 
 ```bash
 rm -rf "/Applications/Hermes Desktop.app"
 rm -f ~/.local/bin/hermes-desktop
-# optional: wipe UI state (keeps nothing remote-side)
-# rm -rf "~/Library/Application Support/Hermes"
+# optional UI state only (does not touch the remote agent):
+# rm -rf "$HOME/Library/Application Support/Hermes"
 ```
 
-Do **not** run Hermes Setup on the client unless you intentionally want a full local agent again.
+---
 
-## Security notes
+## Security
 
-- Prefer Tailscale / VPN over exposing `:9119` to the public internet.
-- Username/password backends are for trusted networks; see official dashboard auth docs.
-- Never commit real passwords or session tokens to this repo.
+- Prefer **Tailscale / VPN**; don’t expose `:9119` to the open internet with password auth.
+- Builds are **unsigned** (no Apple Developer ID in this project). Gatekeeper will warn once.
+- Never commit passwords or session tokens.
+
+---
+
+## Why latest upstream `main`?
+
+The shell tracks **newest Desktop UI**; the agent stays on your server. See [docs/WHY-MAIN.md](docs/WHY-MAIN.md).
+
+---
 
 ## Related
 
-- Official Desktop: https://github.com/NousResearch/hermes-agent/tree/main/apps/desktop
-- Docs (remote backend): https://hermes-agent.nousresearch.com/docs/user-guide/desktop#connecting-to-a-remote-backend
-- SSH-tunnel variant: https://github.com/KimFischer99/Hermes-Desktop-Remote
+- Official Desktop source: https://github.com/NousResearch/hermes-agent/tree/main/apps/desktop  
+- Remote backend docs: https://hermes-agent.nousresearch.com/docs/user-guide/desktop#connecting-to-a-remote-backend  
+- SSH-tunnel build kit: https://github.com/KimFischer99/Hermes-Desktop-Remote  
 
 ## License
 
-MIT (scripts/templates in this repo). Upstream Hermes Agent remains under its own license (MIT).
+MIT (this repo’s scripts/templates). Upstream Hermes Agent remains MIT under Nous Research.
