@@ -1,0 +1,8 @@
+{
+  "mode": "remote",
+  "remote": {
+    "url": "http://100.x.x.x:9119",
+    "authMode": "oauth"
+  },
+  "profiles": {}
+}

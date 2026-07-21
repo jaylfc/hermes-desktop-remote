@@ -1,0 +1,15 @@
+# Local config & secrets
+remote-desktop.config.env
+auto-remote.local.cjs
+
+# Build worktree (full hermes-agent clone)
+work/
+
+# Logs
+*.log
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
